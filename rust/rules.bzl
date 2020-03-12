@@ -13,19 +13,45 @@ CrateInfo = provider(
 )
 
 CrateDepInfo = provider(
-    fields = ["trans_crates"],
+    fields = [
+        "trans_crates",
+        "trans_libs",
+    ],
 )
+
+def _get_cc_libs_for_static_executable(dep):
+    libraries_to_link = dep[CcInfo].linking_context.libraries_to_link
+    return depset([_get_cc_lib_preferred_artifact(lib) for lib in libraries_to_link.to_list()])
+
+def _get_cc_lib_preferred_artifact(library_to_link):
+    return (
+        library_to_link.static_library or
+        library_to_link.pic_static_library or
+        library_to_link.interface_library or
+        library_to_link.dynamic_library
+    )
 
 def _get_transitive_crates(deps):
     trans_crates = depset()
+    trans_libs = depset()
     for dep in deps:
         if CrateInfo in dep:
             trans_crates = depset([dep[CrateInfo]], transitive = [trans_crates])
             trans_crates = depset(transitive = [trans_crates, dep[CrateDepInfo].trans_crates])
-    return CrateDepInfo(trans_crates = trans_crates)
+            trans_libs = depset(transitive = [trans_libs, dep[CrateDepInfo].trans_libs])
+        elif CcInfo in dep:
+            libs = _get_cc_libs_for_static_executable(dep)
+            trans_libs = depset(transitive = [trans_libs, libs])
+    return CrateDepInfo(
+        trans_crates = trans_crates,
+        trans_libs = trans_libs,
+    )
 
 def _get_crate_dirname(c):
     return c.dirname
+
+def _get_lib_path(c):
+    return c.path[:-4]
 
 def _rustc(ctx, root, srcs, deps, output, crate_type):
     is_test = False
@@ -76,21 +102,31 @@ def _rustc(ctx, root, srcs, deps, output, crate_type):
     args.add("linker-flavor=lld-link")
     args.add_joined("--codegen", link_args, join_with = " ", format_joined = "link-args=%s")
 
-    trans_deps = _get_transitive_crates(deps).trans_crates
+    trans_deps = _get_transitive_crates(deps)
+    trans_deps_crates = trans_deps.trans_crates
+    trans_deps_libs = trans_deps.trans_libs
     crates_inputs = []
     inputs_deps = depset([root] + srcs)
-    for dep in trans_deps.to_list():
+    for dep in trans_deps_crates.to_list():
         if dep.type == "lib":
             args.add("--extern")
             args.add("%s=%s" % (dep.name, dep.rlib.path))
             inputs_deps = depset([dep.rlib] + dep.srcs, transitive = [inputs_deps])
             crates_inputs += [dep.rlib]
+    inputs_deps = depset(transitive = [inputs_deps, trans_deps_libs])
 
     args.add_all(
         crates_inputs,
         map_each = _get_crate_dirname,
         uniquify = True,
         format_each = "-Ldependency=%s")
+
+    if crate_type == "bin":
+        args.add_all(
+            trans_deps_libs.to_list(),
+            map_each = _get_lib_path,
+            uniquify = True,
+            format_each = "-lstatic=%s")
 
     ctx.actions.run(
         outputs = [output],
@@ -149,7 +185,12 @@ rust_binary = rule(
     attrs = {
         "root": attr.label(mandatory = True, allow_single_file=True),
         "srcs": attr.label_list(mandatory = True, allow_files = True),
-        "deps": attr.label_list(),
+        "deps": attr.label_list(
+            providers = [
+                [CrateInfo, CrateDepInfo],
+                [CcInfo],
+            ],
+        ),
         "_cc_toolchain": attr.label(default = "@bazel_tools//tools/cpp:current_cc_toolchain"),
     },
     toolchains = [
@@ -165,7 +206,12 @@ rust_library = rule(
     attrs = {
         "root": attr.label(mandatory = True, allow_single_file=True),
         "srcs": attr.label_list(mandatory = True, allow_files = True),
-        "deps": attr.label_list(),
+        "deps": attr.label_list(
+            providers = [
+                [CrateInfo, CrateDepInfo],
+                [CcInfo],
+            ],
+        ),
         "_cc_toolchain": attr.label(default = "@bazel_tools//tools/cpp:current_cc_toolchain"),
     },
     toolchains = [

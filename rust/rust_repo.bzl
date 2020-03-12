@@ -33,7 +33,7 @@ def _find_url(lines, pkg):
 
 def _download(ctx):
     triple = "x86_64-pc-windows-msvc"
-    version = "1.41.1"
+    version = "1.42.0"
 
     url = "https://static.rust-lang.org/dist/channel-rust-%s.toml" % version
     rustc_name = "[pkg.rustc.target.%s]" % triple
