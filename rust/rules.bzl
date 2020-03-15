@@ -9,6 +9,8 @@ CrateInfo = provider(
         "type",
         "root",
         "srcs",
+        "cfgs",
+        "edition",
     ],
 )
 
@@ -16,6 +18,7 @@ CrateDepInfo = provider(
     fields = [
         "trans_crates",
         "trans_libs",
+        "link_args",
     ],
 )
 
@@ -34,17 +37,21 @@ def _get_cc_lib_preferred_artifact(library_to_link):
 def _get_transitive_crates(deps):
     trans_crates = depset()
     trans_libs = depset()
+    link_args = []
     for dep in deps:
         if CrateInfo in dep:
             trans_crates = depset([dep[CrateInfo]], transitive = [trans_crates])
             trans_crates = depset(transitive = [trans_crates, dep[CrateDepInfo].trans_crates])
             trans_libs = depset(transitive = [trans_libs, dep[CrateDepInfo].trans_libs])
+            link_args += dep[CrateDepInfo].link_args
         elif CcInfo in dep:
             libs = _get_cc_libs_for_static_executable(dep)
             trans_libs = depset(transitive = [trans_libs, libs])
+            link_args += dep[CcInfo].linking_context.user_link_flags
     return CrateDepInfo(
         trans_crates = trans_crates,
         trans_libs = trans_libs,
+        link_args = link_args,
     )
 
 def _get_crate_dirname(c):
@@ -53,7 +60,7 @@ def _get_crate_dirname(c):
 def _get_lib_path(c):
     return c.path[:-4]
 
-def _rustc(ctx, root, srcs, deps, output, crate_type):
+def _rustc(ctx, root, srcs, deps, cfgs, edition, output, crate_type):
     is_test = False
     if crate_type == "test":
         is_test = True
@@ -92,17 +99,21 @@ def _rustc(ctx, root, srcs, deps, output, crate_type):
     args.add(root.path)
     args.add("--crate-name", ctx.label.name)
     args.add("--crate-type", crate_type)
-    args.add("--edition=2018")
+    args.add("--edition=%s" % edition)
     if is_test:
         args.add("--test")
+    for c in cfgs:
+        args.add_all(["--cfg", c])
     args.add("-o", output.path)
     args.add("-C")
     args.add("linker=%s" % lld.path)
     args.add("-C")
     args.add("linker-flavor=lld-link")
-    args.add_joined("--codegen", link_args, join_with = " ", format_joined = "link-args=%s")
 
     trans_deps = _get_transitive_crates(deps)
+
+    args.add_joined("--codegen", link_args + trans_deps.link_args, join_with = " ", format_joined = "link-args=%s")
+
     trans_deps_crates = trans_deps.trans_crates
     trans_deps_libs = trans_deps.trans_libs
     crates_inputs = []
@@ -139,7 +150,7 @@ def _rustc(ctx, root, srcs, deps, output, crate_type):
 
 def _rust_binary_impl(ctx):
     output = ctx.actions.declare_file(ctx.label.name + ".exe")
-    _rustc(ctx, ctx.file.root, ctx.files.srcs, ctx.attr.deps, output, "bin")
+    _rustc(ctx, ctx.file.root, ctx.files.srcs, ctx.attr.deps, ctx.attr.cfgs, ctx.attr.edition, output, "bin")
     return [
         DefaultInfo(
             executable = output,
@@ -151,12 +162,14 @@ def _rust_binary_impl(ctx):
             type = "bin",
             root = ctx.file.root,
             srcs = ctx.files.srcs,
+            cfgs = ctx.attr.cfgs,
+            edition = ctx.attr.edition,
         ),
     ]
 
 def _rust_library_impl(ctx):
     output = ctx.actions.declare_file("lib" + ctx.label.name + ".rlib")
-    _rustc(ctx, ctx.file.root, ctx.files.srcs, ctx.attr.deps, output, "lib")
+    _rustc(ctx, ctx.file.root, ctx.files.srcs, ctx.attr.deps, ctx.attr.cfgs, ctx.attr.edition, output, "lib")
     return [
         DefaultInfo(files = depset([output])),
         CrateInfo(
@@ -166,6 +179,8 @@ def _rust_library_impl(ctx):
             type = "lib",
             root = ctx.file.root,
             srcs = ctx.files.srcs,
+            cfgs = ctx.attr.cfgs,
+            edition = ctx.attr.edition,
         ),
         _get_transitive_crates(ctx.attr.deps),
     ]
@@ -173,7 +188,7 @@ def _rust_library_impl(ctx):
 def _rust_test_impl(ctx):
     output = ctx.actions.declare_file(ctx.label.name + ".exe")
     crate_info = ctx.attr.crate[CrateInfo]
-    _rustc(ctx, crate_info.root, crate_info.srcs, crate_info.deps, output, "test")
+    _rustc(ctx, crate_info.root, crate_info.srcs, crate_info.deps, crate_info.cfgs, crate_info.edition, output, "test")
     return [
         DefaultInfo(
             executable = output,
@@ -191,6 +206,8 @@ rust_binary = rule(
                 [CcInfo],
             ],
         ),
+        "cfgs": attr.string_list(),
+        "edition": attr.string(default = "2018"),
         "_cc_toolchain": attr.label(default = "@bazel_tools//tools/cpp:current_cc_toolchain"),
     },
     toolchains = [
@@ -212,6 +229,8 @@ rust_library = rule(
                 [CcInfo],
             ],
         ),
+        "cfgs": attr.string_list(),
+        "edition": attr.string(default = "2018"),
         "_cc_toolchain": attr.label(default = "@bazel_tools//tools/cpp:current_cc_toolchain"),
     },
     toolchains = [
