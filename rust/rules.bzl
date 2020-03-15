@@ -110,6 +110,16 @@ def _rustc(ctx, root, srcs, deps, cfgs, edition, output, crate_type):
     args.add("-C")
     args.add("linker-flavor=lld-link")
 
+    debug_level = "0"
+    opt_level = "0"
+    if ctx.var["COMPILATION_MODE"] == "dbg":
+        debug_level = "2"
+    elif ctx.var["COMPILATION_MODE"] == "opt":
+        opt_level = "3"
+
+    args.add("--codegen=opt-level=%s" % opt_level)
+    args.add("--codegen=debuginfo=%s" % debug_level)
+
     trans_deps = _get_transitive_crates(deps)
 
     args.add_joined("--codegen", link_args + trans_deps.link_args, join_with = " ", format_joined = "link-args=%s")
